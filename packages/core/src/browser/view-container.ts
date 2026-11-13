@@ -1,43 +1,47 @@
-/********************************************************************************
- * Copyright (C) 2018-2019 TypeFox and others.
- *
- * This program and the accompanying materials are made available under the
- * terms of the Eclipse Public License v. 2.0 which is available at
- * http://www.eclipse.org/legal/epl-2.0.
- *
- * This Source Code may also be made available under the following Secondary
- * Licenses when the conditions for such availability set forth in the Eclipse
- * Public License v. 2.0 are satisfied: GNU General Public License, version 2
- * with the GNU Classpath Exception which is available at
- * https://www.gnu.org/software/classpath/license.html.
- *
- * SPDX-License-Identifier: EPL-2.0 OR GPL-2.0 WITH Classpath-exception-2.0
- ********************************************************************************/
+// *****************************************************************************
+// Copyright (C) 2018-2019 TypeFox and others.
+//
+// This program and the accompanying materials are made available under the
+// terms of the Eclipse Public License v. 2.0 which is available at
+// http://www.eclipse.org/legal/epl-2.0.
+//
+// This Source Code may also be made available under the following Secondary
+// Licenses when the conditions for such availability set forth in the Eclipse
+// Public License v. 2.0 are satisfied: GNU General Public License, version 2
+// with the GNU Classpath Exception which is available at
+// https://www.gnu.org/software/classpath/license.html.
+//
+// SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
+// *****************************************************************************
 
 import { interfaces, injectable, inject, postConstruct } from 'inversify';
-import { IIterator, toArray, find, some, every, map, ArrayExt } from '@phosphor/algorithm';
+import { find, some, every, map, ArrayExt } from '@lumino/algorithm';
 import {
     Widget, EXPANSION_TOGGLE_CLASS, COLLAPSED_CLASS, CODICON_TREE_ITEM_CLASSES, MessageLoop, Message, SplitPanel,
-    BaseWidget, addEventListener, SplitLayout, LayoutItem, PanelLayout, addKeyListener, waitForRevealed, UnsafeWidgetUtilities, DockPanel
-} from './widgets';
-import { Event as CommonEvent, Emitter } from '../common/event';
-import { Disposable, DisposableCollection } from '../common/disposable';
-import { CommandRegistry } from '../common/command';
-import { MenuModelRegistry, MenuPath, MenuAction } from '../common/menu';
-import { ApplicationShell, StatefulWidget, SplitPositionHandler, SplitPositionOptions, SIDE_PANEL_TOOLBAR_CONTEXT_MENU } from './shell';
-import { MAIN_AREA_ID, BOTTOM_AREA_ID } from './shell/theia-dock-panel';
-import { FrontendApplicationStateService } from './frontend-application-state';
-import { ContextMenuRenderer, Anchor } from './context-menu-renderer';
-import { parseCssMagnitude } from './browser';
-import { TabBarToolbarRegistry, TabBarToolbarFactory, TabBarToolbar, TabBarDelegator, TabBarToolbarItem } from './shell/tab-bar-toolbar';
-import { isEmpty } from '../common';
-import { WidgetManager } from './widget-manager';
-import { Key } from './keys';
-import { ProgressBarFactory } from './progress-bar-factory';
-import { Drag, IDragEvent } from '@phosphor/dragdrop';
-import { MimeData } from '@phosphor/coreutils';
-import { ElementExt } from '@phosphor/domutils';
-import { TabBarDecoratorService } from './shell/tab-bar-decorator';
+    BaseWidget, addEventListener, SplitLayout, LayoutItem, PanelLayout, addKeyListener, UnsafeWidgetUtilities, DockPanel, PINNED_CLASS
+} from './widgets/index.js';
+import { Event as CommonEvent, Emitter } from '../common/event.js';
+import { Disposable, DisposableCollection } from '../common/disposable.js';
+import { CommandRegistry } from '../common/command.js';
+import { MenuModelRegistry, MenuPath, MenuAction, SubmenuImpl, ActionMenuNode, Submenu } from '../common/menu/index.js';
+import { ApplicationShell, StatefulWidget, SplitPositionHandler, SplitPositionOptions, SIDE_PANEL_TOOLBAR_CONTEXT_MENU } from './shell/index.js';
+import { MAIN_AREA_ID, BOTTOM_AREA_ID } from './shell/theia-dock-panel.js';
+import { FrontendApplicationStateService } from './frontend-application-state.js';
+import { ContextMenuRenderer, Anchor } from './context-menu-renderer.js';
+import { animationFrame, parseCssMagnitude } from './browser.js';
+import { TabBarToolbarRegistry, TabBarToolbarFactory, TabBarToolbar, TabBarDelegator } from './shell/tab-bar-toolbar/index.js';
+import { isEmpty, isObject, nls } from '../common/index.js';
+import { WidgetManager } from './widget-manager.js';
+import { Key } from './keys.js';
+import { ProgressBarFactory } from './progress-bar-factory.js';
+import { Drag } from '@lumino/dragdrop';
+import { MimeData } from '@lumino/coreutils';
+import { ElementExt } from '@lumino/domutils';
+import { TabBarDecoratorService } from './shell/tab-bar-decorator.js';
+import { ContextKeyService, ContextMatcher } from './context-key-service.js';
+import { KeybindingRegistry } from './keybinding.js';
+import { SubmenuAsToolbarItemWrapper } from './shell/tab-bar-toolbar/tab-bar-toolbar-menu-adapters.js';
+import { TheiaSplitPanel } from './shell/theia-split-panel.js';
 
 export interface ViewContainerTitleOptions {
     label: string;
@@ -54,12 +58,59 @@ export class ViewContainerIdentifier {
 
 export interface DescriptionWidget {
     description: string;
-    onDidChangeDescription: Emitter<void>;
+    onDidChangeDescription: CommonEvent<void>;
+}
+
+export interface BadgeWidget {
+    badge?: number;
+    badgeTooltip?: string;
+    onDidChangeBadge: CommonEvent<void>;
+    onDidChangeBadgeTooltip: CommonEvent<void>;
 }
 
 export namespace DescriptionWidget {
-    export function is(arg: Object | undefined): arg is DescriptionWidget {
-        return !!arg && typeof arg === 'object' && 'onDidChangeDescription' in arg;
+    export function is(arg: unknown): arg is DescriptionWidget {
+        return isObject(arg) && 'onDidChangeDescription' in arg;
+    }
+}
+
+export namespace BadgeWidget {
+    export function is(arg: unknown): arg is BadgeWidget {
+        return isObject(arg) && 'onDidChangeBadge' in arg && 'onDidChangeBadgeTooltip' in arg;
+    }
+}
+
+/**
+ * A widget that may change it's internal structure dynamically.
+ * Current use is to update the toolbar when a contributed view is constructed "lazily".
+ */
+export interface DynamicToolbarWidget {
+    onDidChangeToolbarItems: CommonEvent<void>;
+}
+
+export namespace DynamicToolbarWidget {
+    export function is(arg: unknown): arg is DynamicToolbarWidget {
+        return isObject(arg) && 'onDidChangeToolbarItems' in arg;
+    }
+}
+
+class PartsMenuToolbarItem extends SubmenuAsToolbarItemWrapper {
+    constructor(
+        protected readonly target: () => Widget | undefined,
+        effectiveMenuPath: MenuPath,
+        commandRegistry: CommandRegistry,
+        menuRegistry: MenuModelRegistry,
+        contextKeyService: ContextKeyService,
+        contextMenuRenderer: ContextMenuRenderer,
+        menuNode: Submenu,
+        group: string | undefined,
+        menuPath?: MenuPath,
+    ) {
+        super(effectiveMenuPath, commandRegistry, menuRegistry, contextKeyService, contextMenuRenderer, menuNode, group);
+    }
+
+    override isVisible(widget: Widget, contextMatcher: ContextMatcher): boolean {
+        return widget === this.target() && super.isVisible(widget, contextMatcher);
     }
 }
 
@@ -119,13 +170,23 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
     @inject(TabBarDecoratorService)
     protected readonly decoratorService: TabBarDecoratorService;
 
+    @inject(ContextKeyService)
+    protected readonly contextKeyService: ContextKeyService;
+
+    @inject(KeybindingRegistry)
+    protected readonly keybindingRegistry: KeybindingRegistry;
+
     @postConstruct()
     protected init(): void {
+        this.toDispose.push(Disposable.create(() => {
+            this.toDisposeOnUpdateTitle.dispose();
+            this.toDisposeOnDragEnd.dispose();
+        }));
         this.id = this.options.id;
         this.addClass('theia-view-container');
         const layout = new PanelLayout();
         this.layout = layout;
-        this.panel = new SplitPanel({
+        this.panel = new TheiaSplitPanel({
             layout: new ViewContainerLayout({
                 renderer: SplitPanel.defaultRenderer,
                 orientation: this.orientation,
@@ -143,7 +204,11 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
                 if (event.button === 2 && every(this.containerLayout.iter(), part => !!part.isHidden)) {
                     event.stopPropagation();
                     event.preventDefault();
-                    contextMenuRenderer.render({ menuPath: this.contextMenuPath, anchor: event });
+                    contextMenuRenderer.render({
+                        menuPath: this.contextMenuPath,
+                        anchor: event,
+                        context: event.currentTarget instanceof HTMLElement ? event.currentTarget : this.node
+                    });
                 }
             }),
             commandRegistry.registerCommand({ id: this.globalHideCommandId }, {
@@ -164,7 +229,7 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
             }),
             menuRegistry.registerMenuAction([...this.contextMenuPath, '0_global'], {
                 commandId: this.globalHideCommandId,
-                label: 'Hide'
+                label: nls.localizeByDefault('Hide')
             }),
             this.onDidChangeTrackableWidgetsEmitter,
             this.onDidChangeTrackableWidgets(() => this.decoratorService.fireDidChangeDecorations())
@@ -178,8 +243,6 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
         layout.addWidget(this.panel);
     }
 
-    protected readonly toDisposeOnCurrentPart = new DisposableCollection();
-
     protected updateCurrentPart(part?: ViewContainerPart): void {
         if (part && this.getParts().indexOf(part) !== -1) {
             this.currentPart = part;
@@ -192,6 +255,19 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
         this.currentPart = expandedParts[0] || visibleParts[0];
     }
 
+    protected updateSplitterVisibility(): void {
+        const className = 'lm-first-visible';
+        let firstFound = false;
+        for (const part of this.getParts()) {
+            if (!part.isHidden && !firstFound) {
+                part.addClass(className);
+                firstFound = true;
+            } else {
+                part.removeClass(className);
+            }
+        }
+    }
+
     protected titleOptions: ViewContainerTitleOptions | undefined;
 
     setTitleOptions(titleOptions: ViewContainerTitleOptions | undefined): void {
@@ -199,7 +275,7 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
         this.updateTitle();
     }
 
-    protected readonly toDisposeOnUpdateTitle = new DisposableCollection();
+    protected toDisposeOnUpdateTitle = new DisposableCollection();
 
     protected _tabBarDelegate: Widget = this;
     updateTabBarDelegate(): void {
@@ -217,20 +293,21 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
 
     protected updateTitle(): void {
         this.toDisposeOnUpdateTitle.dispose();
-        this.toDispose.push(this.toDisposeOnUpdateTitle);
+        this.toDisposeOnUpdateTitle = new DisposableCollection();
         this.updateTabBarDelegate();
         let title = Object.assign({}, this.titleOptions);
         if (isEmpty(title)) {
             return;
         }
         const allParts = this.getParts();
+        // The title and the menu of the parts in the toolbar show the labels of the parts.
+        this.toDisposeOnUpdateTitle.pushAll(allParts.map(part => part.onTitleChanged(() => this.updateTitle())));
         const visibleParts = allParts.filter(part => !part.isHidden);
         this.title.label = title.label;
         // If there's only one visible part - inline it's title into the container title except in case the part
         // isn't originally belongs to this container but there are other **original** hidden parts.
         if (visibleParts.length === 1 && (visibleParts[0].originalContainerId === this.id || !this.findOriginalPart())) {
             const part = visibleParts[0];
-            this.toDisposeOnUpdateTitle.push(part.onTitleChanged(() => this.updateTitle()));
             const partLabel = part.wrapped.title.label;
             // Change the container title if it contains only one part that originally belongs to another container.
             if (allParts.length === 1 && part.originalContainerId !== this.id && !this.isCurrentTitle(part.originalContainerTitle)) {
@@ -258,56 +335,39 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
             }
         }
         this.updateToolbarItems(allParts);
-        const caption = title?.caption || title?.label;
-        if (caption) {
-            this.title.caption = caption;
-            if (visibleParts.length === 1) {
-                const partCaption = visibleParts[0].wrapped.title.caption || visibleParts[0].wrapped.title.label;
-                if (partCaption) {
-                    this.title.caption += ': ' + partCaption;
-                }
-            }
-        }
+        this.title.caption = title?.caption || title?.label;
         if (title.iconClass) {
             this.title.iconClass = title.iconClass;
         }
-        if (title.closeable !== undefined) {
+        if (this.title.className.includes(PINNED_CLASS)) {
+            this.title.closable &&= false;
+        } else if (title.closeable !== undefined) {
             this.title.closable = title.closeable;
         }
     }
 
     protected updateToolbarItems(allParts: ViewContainerPart[]): void {
         if (allParts.length > 1) {
-            const group = this.getToggleVisibilityGroupLabel();
+            const group = new SubmenuImpl(`toggleParts-${this.id}`, this.getToggleVisibilityGroupLabel(), undefined, '000');
             for (const part of allParts) {
                 const existingId = this.toggleVisibilityCommandId(part);
-                const { caption, label, dataset: { visibilityCommandLabel } } = part.wrapped.title;
-                this.registerToolbarItem(existingId, { tooltip: visibilityCommandLabel || caption || label, group });
+                const { label } = part.wrapped.title;
+                group.addNode(new ActionMenuNode({
+                    commandId: existingId,
+                    label: label
+                }, this.commandRegistry, this.keybindingRegistry, this.contextKeyService));
             }
+
+            // widget === this.getTabBarDelegate()
+
+            const toolbarItem = new PartsMenuToolbarItem(() => this.getTabBarDelegate(), [this.id], this.commandRegistry, this.menuRegistry,
+                this.contextKeyService, this.contextMenuRenderer, group, '000_views', [this.id]);
+            this.toDisposeOnUpdateTitle.push(this.toolbarRegistry.doRegisterItem(toolbarItem));
         }
     }
 
     protected getToggleVisibilityGroupLabel(): string {
-        return 'view';
-    }
-
-    protected registerToolbarItem(commandId: string, options?: Partial<Omit<TabBarToolbarItem, 'id' | 'command'>>): void {
-        const newId = `${this.id}-tabbar-toolbar-${commandId}`;
-        const existingHandler = this.commandRegistry.getAllHandlers(commandId)[0];
-        const existingCommand = this.commandRegistry.getCommand(commandId);
-        if (existingHandler && existingCommand) {
-            this.toDisposeOnUpdateTitle.push(this.commandRegistry.registerCommand({ ...existingCommand, id: newId }, {
-                execute: (_widget, ...args) => this.commandRegistry.executeCommand(commandId, ...args),
-                isToggled: (_widget, ...args) => this.commandRegistry.isToggled(commandId, ...args),
-                isEnabled: (_widget, ...args) => this.commandRegistry.isEnabled(commandId, ...args),
-                isVisible: (widget, ...args) => widget === this.getTabBarDelegate() && this.commandRegistry.isVisible(commandId, ...args),
-            }));
-            this.toDisposeOnUpdateTitle.push(this.toolbarRegistry.registerItem({
-                ...options,
-                id: newId,
-                command: newId,
-            }));
-        }
+        return 'Views';
     }
 
     protected findOriginalPart(): ViewContainerPart | undefined {
@@ -367,6 +427,7 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
         this.refreshMenu(newPart);
         this.updateTitle();
         this.updateCurrentPart();
+        this.updateSplitterVisibility();
         this.update();
         this.fireDidChangeTrackableWidgets();
         toRemoveWidget.pushAll([
@@ -382,6 +443,7 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
                     this.update();
                     this.updateTitle();
                     this.updateCurrentPart();
+                    this.updateSplitterVisibility();
                     this.fireDidChangeTrackableWidgets();
                 }
             }),
@@ -389,16 +451,19 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
             newPart.onDidChangeVisibility(() => {
                 this.updateTitle();
                 this.updateCurrentPart();
+                this.updateSplitterVisibility();
+                this.containerLayout.updateSashes();
             }),
             newPart.onCollapsed(() => {
                 this.containerLayout.updateCollapsed(newPart, this.enableAnimation);
+                this.containerLayout.updateSashes();
                 this.updateCurrentPart();
             }),
             newPart.onContextMenu(event => {
                 if (event.button === 2) {
                     event.preventDefault();
                     event.stopPropagation();
-                    this.contextMenuRenderer.render({ menuPath: this.contextMenuPath, anchor: event });
+                    this.contextMenuRenderer.render({ menuPath: this.contextMenuPath, anchor: event, context: this.node });
                 }
             }),
             newPart.onTitleChanged(() => this.refreshMenu(newPart)),
@@ -407,6 +472,26 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
 
         newPart.disposed.connect(() => toRemoveWidget.dispose());
         return toRemoveWidget;
+    }
+
+    /**
+     * Applies the pending part sizes one animation frame later: a container just shown has a provisional size until its
+     * first layout pass.
+     */
+    protected requestPendingPartSizes(): void {
+        if (this.pendingPartSizes && this.isVisible) {
+            this.pendingPartSizesFrame ??= animationFrame().then(() => {
+                this.pendingPartSizesFrame = undefined;
+                this.applyPendingPartSizes();
+            });
+        }
+    }
+
+    protected applyPendingPartSizes(): void {
+        if (this.pendingPartSizes && this.containerLayout.setPartSizes(this.pendingPartSizes())) {
+            this.pendingPartSizes = undefined;
+            this.updateSplitterVisibility();
+        }
     }
 
     protected createPart(widget: Widget, partId: string, originalContainerId: string, originalContainerTitle?: ViewContainerTitleOptions,
@@ -456,6 +541,12 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
     }
 
     protected lastVisibleState: ViewContainer.State | undefined;
+    /**
+     * Sizes applied to the parts on the first reveal: the part weights, or the sizes of a restored layout. Parts added
+     * after it keep the sizes of the parts already shown.
+     */
+    protected pendingPartSizes: (() => (number | undefined)[]) | undefined = () => this.getParts().map(part => part.options.weight);
+    protected pendingPartSizesFrame: Promise<void> | undefined;
 
     storeState(): ViewContainer.State {
         if (!this.isVisible && this.lastVisibleState) {
@@ -502,9 +593,9 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
         // Reorder the parts according to the stored state
         for (let index = 0; index < partStates.length; index++) {
             const partState = partStates[index];
-            const currentIndex = this.getParts().findIndex(part => part.partId === partState.partId);
-            if (currentIndex > index) {
-                this.containerLayout.moveWidget(currentIndex, index, this.getParts()[currentIndex]);
+            const widget = this.getParts().find(part => part.partId === partState.partId);
+            if (widget) {
+                this.containerLayout.insertWidget(index, widget);
             }
         }
 
@@ -523,9 +614,8 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
         }
 
         // Restore part sizes
-        waitForRevealed(this).then(() => {
-            this.containerLayout.setPartSizes(partStates.map(partState => partState.relativeSize));
-        });
+        this.pendingPartSizes = () => partStates.map(partState => partState.relativeSize);
+        this.requestPendingPartSizes();
     }
 
     /**
@@ -550,8 +640,8 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
                 }
                 return false;
             },
-            isEnabled: arg => toRegister.canHide && (!this.titleOptions || !(arg instanceof Widget) || (arg instanceof ViewContainer && arg.id === this.id)),
-            isVisible: arg => !this.titleOptions || !(arg instanceof Widget) || (arg instanceof ViewContainer && arg.id === this.id)
+            isEnabled: arg => toRegister.canHide && (!this.titleOptions || !(arg instanceof Widget) || arg === this.getTabBarDelegate()),
+            isVisible: arg => !this.titleOptions || !(arg instanceof Widget) || arg === this.getTabBarDelegate()
         });
     }
 
@@ -597,15 +687,16 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
 
     protected moveBefore(toMovedId: string, moveBeforeThisId: string): void {
         const parts = this.getParts();
-        const toMoveIndex = parts.findIndex(part => part.id === toMovedId);
-        const moveBeforeThisIndex = parts.findIndex(part => part.id === moveBeforeThisId);
-        if (toMoveIndex >= 0 && moveBeforeThisIndex >= 0) {
-            this.containerLayout.moveWidget(toMoveIndex, moveBeforeThisIndex, parts[toMoveIndex]);
-            for (let index = Math.min(toMoveIndex, moveBeforeThisIndex); index < parts.length; index++) {
+        const indexToMove = parts.findIndex(part => part.id === toMovedId);
+        const targetIndex = parts.findIndex(part => part.id === moveBeforeThisId);
+        if (indexToMove >= 0 && targetIndex >= 0) {
+            this.containerLayout.insertWidget(targetIndex, parts[indexToMove]);
+            for (let index = Math.min(indexToMove, targetIndex); index < parts.length; index++) {
                 this.refreshMenu(parts[index]);
                 this.activate();
             }
         }
+        this.updateSplitterVisibility();
     }
 
     getTrackableWidgets(): Widget[] {
@@ -640,7 +731,7 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
         return part;
     }
 
-    protected onActivateRequest(msg: Message): void {
+    protected override onActivateRequest(msg: Message): void {
         super.onActivateRequest(msg);
         if (this.currentPart) {
             this.currentPart.activate();
@@ -649,7 +740,7 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
         }
     }
 
-    protected onAfterAttach(msg: Message): void {
+    protected override onAfterAttach(msg: Message): void {
         const orientation = this.orientation;
         this.containerLayout.orientation = orientation;
         if (orientation === 'horizontal') {
@@ -658,62 +749,69 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
             }
         }
         super.onAfterAttach(msg);
+        this.requestPendingPartSizes();
     }
 
-    protected onBeforeHide(msg: Message): void {
+    protected override onBeforeHide(msg: Message): void {
         super.onBeforeHide(msg);
         this.lastVisibleState = this.storeState();
     }
 
-    protected onAfterShow(msg: Message): void {
+    protected override onAfterShow(msg: Message): void {
         super.onAfterShow(msg);
         this.updateTitle();
         this.lastVisibleState = undefined;
+        this.requestPendingPartSizes();
     }
 
-    protected onBeforeAttach(msg: Message): void {
+    protected override onResize(msg: Widget.ResizeMessage): void {
+        super.onResize(msg);
+        this.requestPendingPartSizes();
+    }
+
+    protected override onBeforeAttach(msg: Message): void {
         super.onBeforeAttach(msg);
-        this.node.addEventListener('p-dragenter', this, true);
-        this.node.addEventListener('p-dragover', this, true);
-        this.node.addEventListener('p-dragleave', this, true);
-        this.node.addEventListener('p-drop', this, true);
+        this.node.addEventListener('lm-dragenter', this, true);
+        this.node.addEventListener('lm-dragover', this, true);
+        this.node.addEventListener('lm-dragleave', this, true);
+        this.node.addEventListener('lm-drop', this, true);
     }
 
-    protected onAfterDetach(msg: Message): void {
+    protected override onAfterDetach(msg: Message): void {
         super.onAfterDetach(msg);
-        this.node.removeEventListener('p-dragenter', this, true);
-        this.node.removeEventListener('p-dragover', this, true);
-        this.node.removeEventListener('p-dragleave', this, true);
-        this.node.removeEventListener('p-drop', this, true);
+        this.node.removeEventListener('lm-dragenter', this, true);
+        this.node.removeEventListener('lm-dragover', this, true);
+        this.node.removeEventListener('lm-dragleave', this, true);
+        this.node.removeEventListener('lm-drop', this, true);
     }
 
     handleEvent(event: Event): void {
         switch (event.type) {
-            case 'p-dragenter':
-                this.handleDragEnter(event as IDragEvent);
+            case 'lm-dragenter':
+                this.handleDragEnter(event as Drag.Event);
                 break;
-            case 'p-dragover':
-                this.handleDragOver(event as IDragEvent);
+            case 'lm-dragover':
+                this.handleDragOver(event as Drag.Event);
                 break;
-            case 'p-dragleave':
-                this.handleDragLeave(event as IDragEvent);
+            case 'lm-dragleave':
+                this.handleDragLeave(event as Drag.Event);
                 break;
-            case 'p-drop':
-                this.handleDrop(event as IDragEvent);
+            case 'lm-drop':
+                this.handleDrop(event as Drag.Event);
                 break;
         }
     }
 
-    handleDragEnter(event: IDragEvent): void {
-        if (event.mimeData.hasData('application/vnd.phosphor.view-container-factory')) {
+    handleDragEnter(event: Drag.Event): void {
+        if (event.mimeData.hasData('application/vnd.lumino.view-container-factory')) {
             event.preventDefault();
             event.stopPropagation();
         }
     }
 
     toDisposeOnDragEnd = new DisposableCollection();
-    handleDragOver(event: IDragEvent): void {
-        const factory = event.mimeData.getData('application/vnd.phosphor.view-container-factory');
+    handleDragOver(event: Drag.Event): void {
+        const factory = event.mimeData.getData('application/vnd.lumino.view-container-factory');
         const widget = factory && factory();
         if (!(widget instanceof ViewContainerPart)) {
             return;
@@ -757,17 +855,17 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
         event.dropAction = event.proposedAction;
     };
 
-    handleDragLeave(event: IDragEvent): void {
+    handleDragLeave(event: Drag.Event): void {
         this.toDisposeOnDragEnd.dispose();
-        if (event.mimeData.hasData('application/vnd.phosphor.view-container-factory')) {
+        if (event.mimeData.hasData('application/vnd.lumino.view-container-factory')) {
             event.preventDefault();
             event.stopPropagation();
         }
     };
 
-    handleDrop(event: IDragEvent): void {
+    handleDrop(event: Drag.Event): void {
         this.toDisposeOnDragEnd.dispose();
-        const factory = event.mimeData.getData('application/vnd.phosphor.view-container-factory');
+        const factory = event.mimeData.getData('application/vnd.lumino.view-container-factory');
         const draggedPart = factory && factory();
         if (!(draggedPart instanceof ViewContainerPart)) {
             event.dropAction = 'none';
@@ -794,7 +892,7 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
                 event => {
                     event.preventDefault();
                     const mimeData = new MimeData();
-                    mimeData.setData('application/vnd.phosphor.view-container-factory', () => part);
+                    mimeData.setData('application/vnd.lumino.view-container-factory', () => part);
                     const clonedHeader = part.headerElement.cloneNode(true) as HTMLElement;
                     clonedHeader.style.width = part.node.style.width;
                     clonedHeader.style.opacity = '0.6';
@@ -804,7 +902,7 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
                         proposedAction: 'move',
                         supportedActions: 'move'
                     });
-                    part.node.classList.add('p-mod-hidden');
+                    part.node.classList.add('lm-mod-hidden');
                     drag.start(event.clientX, event.clientY).then(dropAction => {
                         // The promise is resolved when the drag has ended
                         if (dropAction === 'move' && part.currentViewContainerId !== this.id) {
@@ -812,7 +910,7 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
                             this.lastVisibleState = this.doStoreState();
                         }
                     });
-                    setTimeout(() => { part.node.classList.remove('p-mod-hidden'); }, 0);
+                    setTimeout(() => { part.node.classList.remove('lm-mod-hidden'); }, 0);
                 }, false));
     }
 
@@ -850,6 +948,7 @@ export namespace ViewContainer {
 
         export interface WidgetOptions {
             readonly order?: number;
+            /** Relative size of the part, applied when the container is first shown without a restored layout. */
             readonly weight?: number;
             readonly initiallyCollapsed?: boolean;
             readonly canHide?: boolean;
@@ -892,10 +991,7 @@ export class ViewContainerPart extends BaseWidget {
     protected readonly body: HTMLElement;
     protected readonly collapsedEmitter = new Emitter<boolean>();
     protected readonly contextMenuEmitter = new Emitter<MouseEvent>();
-    /**
-     * @deprecated since 0.11.0, use `onDidChangeVisibility` instead
-     */
-    readonly onVisibilityChanged = this.onDidChangeVisibility;
+
     protected readonly onTitleChangedEmitter = new Emitter<void>();
     readonly onTitleChanged = this.onTitleChangedEmitter.event;
     protected readonly onDidFocusEmitter = new Emitter<this>();
@@ -904,6 +1000,10 @@ export class ViewContainerPart extends BaseWidget {
     readonly onDidMove = this.onPartMovedEmitter.event;
     protected readonly onDidChangeDescriptionEmitter = new Emitter<void>();
     readonly onDidChangeDescription = this.onDidChangeDescriptionEmitter.event;
+    protected readonly onDidChangeBadgeEmitter = new Emitter<void>();
+    readonly onDidChangeBadge = this.onDidChangeBadgeEmitter.event;
+    protected readonly onDidChangeBadgeTooltipEmitter = new Emitter<void>();
+    readonly onDidChangeBadgeTooltip = this.onDidChangeBadgeTooltipEmitter.event;
 
     protected readonly toolbar: TabBarToolbar;
 
@@ -935,8 +1035,19 @@ export class ViewContainerPart extends BaseWidget {
         this.toDispose.push(Disposable.create(() => this.wrapped.title.changed.disconnect(fireTitleChanged)));
 
         if (DescriptionWidget.is(this.wrapped)) {
-            const fireDescriptionChanged = () => this.onDidChangeDescriptionEmitter.fire(undefined);
-            this.toDispose.push(this.wrapped?.onDidChangeDescription.event(fireDescriptionChanged));
+            this.wrapped?.onDidChangeDescription(() => this.onDidChangeDescriptionEmitter.fire(), undefined, this.toDispose);
+        }
+
+        if (BadgeWidget.is(this.wrapped)) {
+            this.wrapped.onDidChangeBadge(() => this.onDidChangeBadgeEmitter.fire(), undefined, this.toDispose);
+            this.wrapped.onDidChangeBadgeTooltip(() => this.onDidChangeBadgeTooltipEmitter.fire(), undefined, this.toDispose);
+        }
+
+        if (DynamicToolbarWidget.is(this.wrapped)) {
+            this.wrapped.onDidChangeToolbarItems(() => {
+                this.toolbar.updateTarget(this.wrapped);
+                this.viewContainer?.update();
+            });
         }
 
         const { header, body, disposable } = this.createContent();
@@ -955,6 +1066,8 @@ export class ViewContainerPart extends BaseWidget {
             this.contextMenuEmitter,
             this.onTitleChangedEmitter,
             this.onDidChangeDescriptionEmitter,
+            this.onDidChangeBadgeEmitter,
+            this.onDidChangeBadgeTooltipEmitter,
             this.registerContextMenu(),
             this.onDidFocusEmitter,
             // focus event does not bubble, capture it
@@ -989,11 +1102,12 @@ export class ViewContainerPart extends BaseWidget {
     set collapsed(collapsed: boolean) {
         // Cannot collapse/expand if the orientation of the container is `horizontal`.
         const orientation = ViewContainer.getOrientation(this.node);
-        if (this._collapsed === collapsed || orientation === 'horizontal' && collapsed) {
+        if (this._collapsed === collapsed || (orientation === 'horizontal' && collapsed)) {
             return;
         }
         this._collapsed = collapsed;
         this.node.classList.toggle('collapsed', collapsed);
+
         if (collapsed && this.wrapped.node.contains(document.activeElement)) {
             this.header.focus();
         }
@@ -1015,7 +1129,7 @@ export class ViewContainerPart extends BaseWidget {
         this.onPartMovedEmitter.fire(newContainer);
     }
 
-    setHidden(hidden: boolean): void {
+    override setHidden(hidden: boolean): void {
         if (!this.canHide) {
             return;
         }
@@ -1066,7 +1180,7 @@ export class ViewContainerPart extends BaseWidget {
         return !this.toShowHeader.disposed || this.collapsed;
     }
 
-    protected getScrollContainer(): HTMLElement {
+    protected override getScrollContainer(): HTMLElement {
         return this.body;
     }
 
@@ -1121,6 +1235,14 @@ export class ViewContainerPart extends BaseWidget {
         const description = document.createElement('span');
         description.classList.add('description');
 
+        const badgeSpan = document.createElement('span');
+        badgeSpan.classList.add('notification-count');
+
+        const badgeContainer = document.createElement('div');
+        badgeContainer.classList.add('notification-count-container');
+        badgeContainer.appendChild(badgeSpan);
+        const badgeContainerDisplay = badgeContainer.style.display;
+
         const updateTitle = () => {
             if (this.currentContainerId !== this.originalContainerId && this.originalContainerTitle?.label) {
                 // Creating a title in format: <original_container_title>: <part_title>.
@@ -1133,20 +1255,37 @@ export class ViewContainerPart extends BaseWidget {
         const updateDescription = () => {
             description.innerText = DescriptionWidget.is(this.wrapped) && !this.collapsed && this.wrapped.description || '';
         };
+        const updateBadge = () => {
+            if (BadgeWidget.is(this.wrapped)) {
+                const visibleToolBarItems = this.toolbarRegistry.visibleItems(this.wrapped).length > 0;
+                const badge = this.wrapped.badge;
+                if (badge && !visibleToolBarItems) {
+                    badgeSpan.innerText = badge.toString();
+                    badgeSpan.title = this.wrapped.badgeTooltip || '';
+                    badgeContainer.style.display = badgeContainerDisplay;
+                    return;
+                }
+            }
+            badgeContainer.style.display = 'none';
+        };
 
         updateTitle();
         updateCaption();
         updateDescription();
+        updateBadge();
 
         disposable.pushAll([
             this.onTitleChanged(updateTitle),
             this.onTitleChanged(updateCaption),
             this.onDidMove(updateTitle),
             this.onDidChangeDescription(updateDescription),
+            this.onDidChangeBadge(updateBadge),
+            this.onDidChangeBadgeTooltip(updateBadge),
             this.onCollapsed(updateDescription)
         ]);
         header.appendChild(title);
         header.appendChild(description);
+        header.appendChild(badgeContainer);
 
         return {
             header,
@@ -1154,21 +1293,33 @@ export class ViewContainerPart extends BaseWidget {
         };
     }
 
-    protected onResize(msg: Widget.ResizeMessage): void {
+    protected handleResize(): void {
+        const handleMouseEnter = () => {
+            this.node?.classList.add('no-pointer-events');
+            setTimeout(() => {
+                this.node?.classList.remove('no-pointer-events');
+                this.node?.removeEventListener('mouseenter', handleMouseEnter);
+            }, 100);
+        };
+        this.node?.addEventListener('mouseenter', handleMouseEnter);
+    }
+
+    protected override onResize(msg: Widget.ResizeMessage): void {
+        this.handleResize();
         if (this.wrapped.isAttached && !this.collapsed) {
             MessageLoop.sendMessage(this.wrapped, Widget.ResizeMessage.UnknownSize);
         }
         super.onResize(msg);
     }
 
-    protected onUpdateRequest(msg: Message): void {
+    protected override onUpdateRequest(msg: Message): void {
         if (this.wrapped.isAttached && !this.collapsed) {
             MessageLoop.sendMessage(this.wrapped, msg);
         }
         super.onUpdateRequest(msg);
     }
 
-    protected onAfterAttach(msg: Message): void {
+    protected override onAfterAttach(msg: Message): void {
         if (!this.wrapped.isAttached) {
             UnsafeWidgetUtilities.attach(this.wrapped, this.body);
         }
@@ -1176,7 +1327,7 @@ export class ViewContainerPart extends BaseWidget {
         super.onAfterAttach(msg);
     }
 
-    protected onBeforeDetach(msg: Message): void {
+    protected override onBeforeDetach(msg: Message): void {
         super.onBeforeDetach(msg);
         if (this.toolbar.isAttached) {
             Widget.detach(this.toolbar);
@@ -1186,42 +1337,42 @@ export class ViewContainerPart extends BaseWidget {
         }
     }
 
-    protected onBeforeShow(msg: Message): void {
+    protected override onBeforeShow(msg: Message): void {
         if (this.wrapped.isAttached && !this.collapsed) {
             MessageLoop.sendMessage(this.wrapped, msg);
         }
         super.onBeforeShow(msg);
     }
 
-    protected onAfterShow(msg: Message): void {
+    protected override onAfterShow(msg: Message): void {
         super.onAfterShow(msg);
         if (this.wrapped.isAttached && !this.collapsed) {
             MessageLoop.sendMessage(this.wrapped, msg);
         }
     }
 
-    protected onBeforeHide(msg: Message): void {
+    protected override onBeforeHide(msg: Message): void {
         if (this.wrapped.isAttached && !this.collapsed) {
             MessageLoop.sendMessage(this.wrapped, msg);
         }
         super.onBeforeShow(msg);
     }
 
-    protected onAfterHide(msg: Message): void {
+    protected override onAfterHide(msg: Message): void {
         super.onAfterHide(msg);
         if (this.wrapped.isAttached && !this.collapsed) {
             MessageLoop.sendMessage(this.wrapped, msg);
         }
     }
 
-    protected onChildRemoved(msg: Widget.ChildMessage): void {
+    protected override onChildRemoved(msg: Widget.ChildMessage): void {
         super.onChildRemoved(msg);
         // if wrapped is not disposed, but detached then we should not dispose it, but only get rid of this part
         this.toNoDisposeWrapped.dispose();
         this.dispose();
     }
 
-    protected onActivateRequest(msg: Message): void {
+    protected override onActivateRequest(msg: Message): void {
         super.onActivateRequest(msg);
         if (this.collapsed) {
             this.header.focus();
@@ -1229,7 +1380,6 @@ export class ViewContainerPart extends BaseWidget {
             this.wrapped.activate();
         }
     }
-
 }
 
 export namespace ViewContainerPart {
@@ -1273,15 +1423,16 @@ export class ViewContainerLayout extends SplitLayout {
         return (this as any)._items as Array<LayoutItem & ViewContainerLayout.Item>;
     }
 
-    iter(): IIterator<ViewContainerPart> {
+    iter(): IterableIterator<ViewContainerPart> {
         return map(this.items, item => item.widget);
     }
 
+    // @ts-expect-error TS2611 `SplitLayout.widgets` is declared as `readonly widgets` but is implemented as a getter.
     get widgets(): ViewContainerPart[] {
-        return toArray(this.iter());
+        return Array.from(this.iter());
     }
 
-    attachWidget(index: number, widget: ViewContainerPart): void {
+    override attachWidget(index: number, widget: ViewContainerPart): void {
         super.attachWidget(index, widget);
         if (index > -1 && this.parent && this.parent.node.contains(this.widgets[index + 1]?.node)) {
             // Set the correct attach index to the DOM elements.
@@ -1290,22 +1441,6 @@ export class ViewContainerLayout extends SplitLayout {
             this.parent.node.insertBefore(this.handles[index], ref);
             this.parent.fit();
         }
-    }
-
-    moveWidget(fromIndex: number, toIndex: number, widget: Widget): void {
-        const ref = this.widgets[toIndex < fromIndex ? toIndex : toIndex + 1];
-        super.moveWidget(fromIndex, toIndex, widget);
-        // Keep the order of `_widgets` array just as done before (by `super`) for the `_items` array -
-        // to prevent later bugs relying on index.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ArrayExt.move((this as any)._widgets, fromIndex, toIndex);
-        if (ref) {
-            this.parent!.node.insertBefore(this.handles[toIndex], ref.node);
-        } else {
-            this.parent!.node.appendChild(this.handles[toIndex]);
-        }
-        UnsafeWidgetUtilities.detach(widget);
-        UnsafeWidgetUtilities.attach(widget, this.parent!.node, this.handles[toIndex]);
     }
 
     getPartSize(part: ViewContainerPart): number | undefined {
@@ -1323,10 +1458,15 @@ export class ViewContainerLayout extends SplitLayout {
      * Set the sizes of the view container parts according to the given weights
      * by moving the split handles. This is similar to `setRelativeSizes` defined
      * in `SplitLayout`, but here we properly consider the collapsed / expanded state.
+     *
+     * @returns `false` if the layout has no size yet, so nothing could be sized; `true` otherwise, even if no part has a weight.
      */
-    setPartSizes(weights: (number | undefined)[]): void {
+    setPartSizes(weights: (number | undefined)[]): boolean {
         const parts = this.widgets;
         const availableSize = this.getAvailableSize();
+        if (availableSize === 0) {
+            return false;
+        }
 
         // Sum up the weights of visible parts
         let totalWeight = 0;
@@ -1339,8 +1479,8 @@ export class ViewContainerLayout extends SplitLayout {
                 weightCount++;
             }
         }
-        if (weightCount === 0 || availableSize === 0) {
-            return;
+        if (weightCount === 0) {
+            return true;
         }
 
         // Add the average weight for visible parts without weight
@@ -1378,6 +1518,7 @@ export class ViewContainerLayout extends SplitLayout {
                 position += this.spacing;
             }
         }
+        return true;
     }
 
     /**
@@ -1413,7 +1554,6 @@ export class ViewContainerLayout extends SplitLayout {
         if (index < 0 || !this.parent || part.isHidden) {
             return;
         }
-
         // Do not store the height of the "stretched item". Otherwise, we mess up the "hint height".
         // Store the height only if there are other expanded items.
         const currentSize = this.orientation === 'horizontal' ? part.node.offsetWidth : part.node.offsetHeight;
@@ -1477,7 +1617,41 @@ export class ViewContainerLayout extends SplitLayout {
         requestAnimationFrame(updateFunc);
     }
 
-    protected onFitRequest(msg: Message): void {
+    updateSashes(): void {
+        const { widgets, handles } = this;
+        if (widgets.length !== handles.length) {
+            console.warn('Unexpected mismatch between number of widgets and number of handles.');
+            return;
+        }
+        const firstUncollapsed = this.getFirstUncollapsedWidgetIndex();
+        const lastUncollapsed = firstUncollapsed === undefined ? undefined : this.getLastUncollapsedWidgetIndex();
+        const allHidden = firstUncollapsed === lastUncollapsed;
+        for (const [index, handle] of this.handles.entries()) {
+            // The or clauses are added for type checking. If they're true, allHidden will also have been true.
+            if (allHidden || firstUncollapsed === undefined || lastUncollapsed === undefined) {
+                handle.classList.add('sash-hidden');
+            } else if (index < lastUncollapsed && index >= firstUncollapsed) {
+                handle.classList.remove('sash-hidden');
+            } else {
+                handle.classList.add('sash-hidden');
+            }
+        }
+    }
+
+    protected getFirstUncollapsedWidgetIndex(): number | undefined {
+        const index = this.widgets.findIndex(widget => !widget.collapsed && !widget.isHidden);
+        return index === -1 ? undefined : index;
+    }
+
+    protected getLastUncollapsedWidgetIndex(): number | undefined {
+        for (let i = this.widgets.length - 1; i >= 0; i--) {
+            if (!this.widgets[i].collapsed && !this.widgets[i].isHidden) {
+                return i;
+            }
+        }
+    }
+
+    protected override onFitRequest(msg: Message): void {
         for (const part of this.widgets) {
             const style = part.node.style;
             if (part.animatedSize !== undefined) {
